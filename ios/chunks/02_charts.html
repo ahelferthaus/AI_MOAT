@@ -1,0 +1,653 @@
+<!--
+  ═══════════════════════════════════════════════════════════
+  CHUNK 2: SVG CHART COMPONENTS + SECTOR DETAIL VIEW
+  ═══════════════════════════════════════════════════════════
+  Preact/htm versions of all Recharts replacements.
+  Uses viewBox for responsive scaling on iOS.
+  
+  Charts: RadarChart, HBarChart, VBarChart, GroupedBarChart,
+          LineChart, ScatterPlot
+  Views:  SectorDetail (drill-down when tapping a sector card)
+  
+  Insert between COMPUTATION and PLACEHOLDER COMPONENTS sections
+  in the scaffold.
+  ═══════════════════════════════════════════════════════════
+-->
+
+<script type="module">
+// ─── Paste after computation functions, before SectorCard ───
+
+// ═══════════════════════════════════════════════════════════
+// SVG CHART COMPONENTS
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * RadarChart — 5-axis pentagon for moat or AI risk dimensions.
+ * @param {Array} data - [{d:"SC", s:4}, ...] (label + score 1-5)
+ * @param {number} size - viewBox dimension (default 200)
+ * @param {string} color - fill/stroke color
+ */
+function RadarChart({ data, size = 200, color = C.ww1 }) {
+  const cx = size / 2, cy = size / 2, r = size * 0.34, n = data.length;
+
+  const pt = (i, v) => {
+    const a = Math.PI * 2 * i / n - Math.PI / 2;
+    return [cx + r * (v / 5) * Math.cos(a), cy + r * (v / 5) * Math.sin(a)];
+  };
+
+  // Grid rings at 1-5
+  const rings = [1, 2, 3, 4, 5].map(v =>
+    data.map((_, i) => pt(i, v).join(",")).join(" ")
+  );
+
+  // Data polygon
+  const dataPoints = data.map((d, i) => pt(i, d.s));
+  const dataPoly = dataPoints.map(p => p.join(",")).join(" ");
+
+  // Labels outside the ring
+  const labels = data.map((d, i) => {
+    const a = Math.PI * 2 * i / n - Math.PI / 2;
+    return { x: cx + (r + 18) * Math.cos(a), y: cy + (r + 18) * Math.sin(a), label: d.d };
+  });
+
+  return html`
+    <svg viewBox="0 0 ${size} ${size}" class="chart-svg radar-chart">
+      ${rings.map((pts, i) => html`
+        <polygon points="${pts}" fill="none"
+          stroke="${C.border}" stroke-width="${i === 4 ? 1.5 : 0.5}" />
+      `)}
+      ${data.map((_, i) => {
+        const [x1, y1] = pt(i, 5);
+        return html`<line x1="${cx}" y1="${cy}" x2="${x1}" y2="${y1}"
+          stroke="${C.border}" stroke-width="0.5" />`;
+      })}
+      <polygon points="${dataPoly}" fill="${color}" fill-opacity="0.18"
+        stroke="${color}" stroke-width="2" />
+      ${dataPoints.map(([x, y]) => html`
+        <circle cx="${x}" cy="${y}" r="3.5" fill="${color}"
+          stroke="#fff" stroke-width="1.5" />
+      `)}
+      ${labels.map(p => html`
+        <text x="${p.x}" y="${p.y}" text-anchor="middle"
+          dominant-baseline="middle" fill="${C.dim}"
+          font-size="10" font-weight="600">${p.label}</text>
+      `)}
+    </svg>
+  `;
+}
+
+/**
+ * HBarChart — horizontal bars for AI risk dimension scores (1-5).
+ * @param {Array} data - [{d:"Labor Sub.", s:4}, ...]
+ * @param {string|Function} color - static color or v => color
+ */
+function HBarChart({ data, color }) {
+  const W = 340, H = 28 * data.length + 20;
+  const ml = 85, mr = 16, mt = 8, mb = 18;
+  const w = W - ml - mr, h = H - mt - mb;
+  const bh = Math.min(18, h / data.length * 0.65);
+
+  const getColor = (v) => {
+    if (typeof color === "function") return color(v);
+    return v >= 4 ? C.red : v >= 3 ? C.orange : C.green;
+  };
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg hbar-chart">
+      ${[0, 1, 2, 3, 4, 5].map(v => {
+        const x = ml + v / 5 * w;
+        return html`
+          <line x1="${x}" y1="${mt}" x2="${x}" y2="${H - mb}"
+            stroke="${C.border}" stroke-width="0.5" />
+          <text x="${x}" y="${H - mb + 12}" text-anchor="middle"
+            fill="${C.dim}" font-size="9">${v}</text>
+        `;
+      })}
+      <line x1="${ml + 3 / 5 * w}" y1="${mt}" x2="${ml + 3 / 5 * w}" y2="${H - mb}"
+        stroke="${C.red}" stroke-width="1" stroke-dasharray="4 3" opacity="0.4" />
+      ${data.map((d, i) => {
+        const y = mt + (i + 0.5) * h / data.length - bh / 2;
+        const bw = d.s / 5 * w;
+        const c = getColor(d.s);
+        return html`
+          <rect x="${ml}" y="${y}" width="${Math.max(2, bw)}" height="${bh}"
+            rx="3" fill="${c}" />
+          <text x="${ml - 6}" y="${y + bh / 2}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.dim}" font-size="10">${d.d}</text>
+        `;
+      })}
+    </svg>
+  `;
+}
+
+/**
+ * VBarChart — vertical bars for net moat score per sector.
+ * Positive bars go up (green), negative go down (red/yellow).
+ * @param {Array} data - [{name, net}, ...] sorted worst-first
+ * @param {Function} onClick - optional handler(sectorName)
+ */
+function VBarChart({ data, onClick }) {
+  const W = 360, H = 260;
+  const ml = 36, mr = 8, mt = 10, mb = 70;
+  const w = W - ml - mr, h = H - mt - mb;
+  const bw = Math.min(22, w / data.length * 0.6);
+
+  const mn = Math.min(...data.map(d => d.net));
+  const mx = Math.max(...data.map(d => d.net));
+  const range = Math.max(Math.abs(mn), Math.abs(mx), 1) * 1.2;
+  const y0 = mt + h * (range / (range * 2));
+
+  const barColor = (n) => n > 1 ? C.green : n > 0 ? "#6bbd5b" : n > -0.5 ? C.yellow : C.red;
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg vbar-chart">
+      ${[-2, -1, 0, 1, 2].filter(v => v >= -range && v <= range).map(v => {
+        const y = mt + h * ((range - v) / (range * 2));
+        return html`
+          <line x1="${ml}" y1="${y}" x2="${W - mr}" y2="${y}"
+            stroke="${v === 0 ? C.dim : C.border}" stroke-width="${v === 0 ? 1 : 0.5}" />
+          <text x="${ml - 5}" y="${y}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.dim}" font-size="9">${v.toFixed(1)}</text>
+        `;
+      })}
+      ${data.map((d, i) => {
+        const x = ml + (i + 0.5) * w / data.length - bw / 2;
+        const barH = Math.abs(d.net) / (range * 2) * h;
+        const y = d.net >= 0 ? y0 - barH : y0;
+        const c = barColor(d.net);
+        const short = d.name.split(" ")[0];
+        return html`
+          <rect x="${x}" y="${y}" width="${bw}" height="${Math.max(1, barH)}"
+            rx="2" fill="${c}"
+            onClick=${onClick ? () => onClick(d.name) : null} />
+          <text x="${x + bw / 2}" y="${H - mb + 10}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.dim}" font-size="7"
+            transform="rotate(-35,${x + bw / 2},${H - mb + 10})"
+            onClick=${onClick ? () => onClick(d.name) : null}>${short}</text>
+        `;
+      })}
+    </svg>
+  `;
+}
+
+/**
+ * GroupedBarChart — horizontal grouped bars: moat (blue) + AI risk (orange).
+ * @param {Array} data - [{name, moatScore, aiScore}, ...]
+ * @param {Function} onClick - optional handler(sectorName)
+ */
+function GroupedBarChart({ data, onClick }) {
+  const W = 360, H = 26 * data.length + 50;
+  const ml = 100, mr = 16, mt = 30, mb = 10;
+  const w = W - ml - mr, h = H - mt - mb;
+  const bw = Math.min(9, w / data.length / 3);
+  const gap = bw * 0.4;
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg grouped-bar-chart">
+      <!-- Legend -->
+      <rect x="${W - mr - 130}" y="4" width="126" height="22" rx="4"
+        fill="${C.cardBg}" stroke="${C.border}" stroke-width="0.5" />
+      <rect x="${W - mr - 122}" y="9" width="10" height="7" rx="2" fill="${C.ww1}" />
+      <text x="${W - mr - 108}" y="13.5" dominant-baseline="middle"
+        fill="${C.dim}" font-size="8">Moat Strength</text>
+      <rect x="${W - mr - 60}" y="9" width="10" height="7" rx="2" fill="${C.orange}" />
+      <text x="${W - mr - 46}" y="13.5" dominant-baseline="middle"
+        fill="${C.dim}" font-size="8">AI Risk</text>
+
+      ${[0, 1, 2, 3, 4, 5].map(v => {
+        const x = ml + v / 5 * w;
+        return html`
+          <line x1="${x}" y1="${mt}" x2="${x}" y2="${mt + h}"
+            stroke="${C.border}" stroke-width="0.5" />
+          <text x="${x}" y="${mt + h + 13}" text-anchor="middle"
+            fill="${C.dim}" font-size="9">${v}</text>
+        `;
+      })}
+      ${data.map((d, i) => {
+        const y = mt + i * (h / data.length) + h / data.length * 0.15;
+        const moatW = (d.moatScore || d.moat || 0) / 5 * w;
+        const aiW = (d.aiScore || d.aiRisk || 0) / 5 * w;
+        const label = d.name || d.sector || "";
+        const short = label.length > 14 ? label.substring(0, 13) + "…" : label;
+        return html`
+          <rect x="${ml}" y="${y}" width="${Math.max(2, moatW)}" height="${bw}"
+            rx="2" fill="${C.ww1}"
+            onClick=${onClick ? () => onClick(label) : null} />
+          <rect x="${ml}" y="${y + bw + gap}" width="${Math.max(2, aiW)}" height="${bw}"
+            rx="2" fill="${C.orange}"
+            onClick=${onClick ? () => onClick(label) : null} />
+          <text x="${ml - 6}" y="${y + bw + gap / 2}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.copy}" font-size="10" font-weight="500"
+            onClick=${onClick ? () => onClick(label) : null}>${short}</text>
+        `;
+      })}
+    </svg>
+  `;
+}
+
+/**
+ * LineChart — CAP base vs AI-adjusted over time horizon.
+ * @param {Array} data - [{year, base, adj}, ...]
+ */
+function LineChart({ data }) {
+  const W = 340, H = 200;
+  const ml = 36, mr = 16, mt = 15, mb = 26;
+  const w = W - ml - mr, h = H - mt - mb;
+  const mx = Math.max(...data.map(d => Math.max(d.base, d.adj)));
+
+  const pt = (i, v) => [ml + i / (data.length - 1) * w, mt + h * (1 - v / mx)];
+
+  const basePts = data.map((d, i) => pt(i, d.base));
+  const adjPts = data.map((d, i) => pt(i, d.adj));
+
+  const areaPath = "M" + basePts.map(p => p.join(",")).join("L") +
+    "L" + basePts[basePts.length - 1][0] + "," + (mt + h) +
+    "L" + basePts[0][0] + "," + (mt + h) + "Z";
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg line-chart">
+      <defs>
+        <linearGradient id="capGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${C.ww1}" stop-opacity="0.3" />
+          <stop offset="100%" stop-color="${C.ww1}" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+      ${[0, 5, 10, 15].filter(v => v <= mx).map(v => {
+        const y = mt + h * (1 - v / mx);
+        return html`
+          <line x1="${ml}" y1="${y}" x2="${W - mr}" y2="${y}"
+            stroke="${C.border}" stroke-width="0.5" stroke-dasharray="3 3" />
+          <text x="${ml - 5}" y="${y}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.dim}" font-size="9">${v}</text>
+        `;
+      })}
+      ${[0, 5, 10, 15, 20, 25].map(v => {
+        const x = ml + v / 25 * w;
+        return html`
+          <text x="${x}" y="${H - mb + 13}" text-anchor="middle"
+            fill="${C.dim}" font-size="9">${v}</text>
+        `;
+      })}
+      <path d="${areaPath}" fill="url(#capGrad)" />
+      <polyline points="${basePts.map(p => p.join(",")).join(" ")}"
+        fill="none" stroke="${C.ww1}" stroke-width="2" />
+      <polyline points="${adjPts.map(p => p.join(",")).join(" ")}"
+        fill="none" stroke="${C.red}" stroke-width="2" stroke-dasharray="6 3" />
+      <!-- Legend -->
+      <rect x="${W - mr - 110}" y="${mt}" width="106" height="32" rx="4"
+        fill="${C.cardBg}" stroke="${C.border}" stroke-width="0.5" />
+      <line x1="${W - mr - 102}" y1="${mt + 10}" x2="${W - mr - 86}" y2="${mt + 10}"
+        stroke="${C.ww1}" stroke-width="2" />
+      <text x="${W - mr - 82}" y="${mt + 10}" dominant-baseline="middle"
+        fill="${C.dim}" font-size="8">Base CAP</text>
+      <line x1="${W - mr - 102}" y1="${mt + 22}" x2="${W - mr - 86}" y2="${mt + 22}"
+        stroke="${C.red}" stroke-width="2" stroke-dasharray="4 2" />
+      <text x="${W - mr - 82}" y="${mt + 22}" dominant-baseline="middle"
+        fill="${C.dim}" font-size="8">AI+BM Adj</text>
+    </svg>
+  `;
+}
+
+/**
+ * ScatterPlot — moat strength (Y) vs AI risk (X) per ticker or sector.
+ * @param {Array} data - [{tk:"AAPL", ms:3.5, ai:2.8, t:"LOW", net:0.7}, ...]
+ */
+function ScatterPlot({ data }) {
+  const W = 360, H = 320;
+  const ml = 42, mr = 16, mt = 16, mb = 36;
+  const w = W - ml - mr, h = H - mt - mb;
+
+  const sc = (v, min, max) => (v - min) / (max - min);
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg scatter-chart">
+      ${[1, 2, 3, 4, 5].map(v => {
+        const x = ml + sc(v, 0.5, 5) * w;
+        const y = mt + (1 - sc(v, 0.5, 5)) * h;
+        return html`
+          <line x1="${x}" y1="${mt}" x2="${x}" y2="${mt + h}"
+            stroke="${C.border}" stroke-width="0.5" />
+          <line x1="${ml}" y1="${y}" x2="${ml + w}" y2="${y}"
+            stroke="${C.border}" stroke-width="0.5" />
+          <text x="${x}" y="${H - mb + 13}" text-anchor="middle"
+            fill="${C.dim}" font-size="9">${v}</text>
+          <text x="${ml - 6}" y="${y}" text-anchor="end"
+            dominant-baseline="middle" fill="${C.dim}" font-size="9">${v}</text>
+        `;
+      })}
+      <!-- Midpoint crosshairs -->
+      <line x1="${ml + sc(2.5, 0.5, 5) * w}" y1="${mt}"
+        x2="${ml + sc(2.5, 0.5, 5) * w}" y2="${mt + h}"
+        stroke="${C.dim}" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.5" />
+      <line x1="${ml}" y1="${mt + (1 - sc(2.5, 0.5, 5)) * h}"
+        x2="${ml + w}" y2="${mt + (1 - sc(2.5, 0.5, 5)) * h}"
+        stroke="${C.dim}" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.5" />
+      <!-- Quadrant labels -->
+      <text x="${ml + 8}" y="${mt + 12}" fill="${C.green}" font-size="7"
+        opacity="0.6">STRONG MOAT / LOW AI RISK</text>
+      <text x="${ml + w - 4}" y="${mt + h - 6}" fill="${C.red}" font-size="7"
+        text-anchor="end" opacity="0.6">WEAK MOAT / HIGH AI RISK</text>
+      <!-- Data points -->
+      ${data.map(d => {
+        const x = ml + sc(d.ai, 0.5, 5) * w;
+        const y = mt + (1 - sc(d.ms, 0.5, 5)) * h;
+        const tc = TIER_COLORS[d.t] || C.dim;
+        return html`
+          <circle cx="${x}" cy="${y}" r="8" fill="${tc}" fill-opacity="0.85"
+            stroke="#fff" stroke-width="1.5" />
+          <text x="${x}" y="${y - 12}" text-anchor="middle"
+            fill="${C.copy}" font-size="8" font-weight="700">${d.tk}</text>
+        `;
+      })}
+      <!-- Axis labels -->
+      <text x="${ml + w / 2}" y="${H - 4}" text-anchor="middle"
+        fill="${C.dim}" font-size="10">AI Disruption Risk →</text>
+      <text x="12" y="${mt + h / 2}" text-anchor="middle"
+        dominant-baseline="middle" fill="${C.dim}" font-size="10"
+        transform="rotate(-90,12,${mt + h / 2})">← Moat Strength</text>
+    </svg>
+  `;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// SECTOR DETAIL VIEW (drill-down from tapping a sector card)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * SectorDetail — full-screen detail when a sector card is tapped.
+ * Shows radar charts for moat + AI risk, score breakdown, CAP chart.
+ * @param {string} sector - sector name
+ * @param {Object} data - from computeSComp result
+ * @param {Object} raw - raw SECTOR_DB entry (for individual scores)
+ * @param {Function} onBack - handler to close detail
+ */
+function SectorDetail({ sector, data, raw, onBack }) {
+  const tc = TIER_COLORS[data.tier] || C.dim;
+  const nc = data.netScore > 1 ? C.green : data.netScore > 0 ? "#6bbd5b" :
+    data.netScore > -0.5 ? C.yellow : C.red;
+
+  // Build radar data from raw scores
+  const moatData = [
+    { d: "SC", s: raw.sc }, { d: "NE", s: raw.ne }, { d: "IA", s: raw.ia },
+    { d: "CA", s: raw.ca }, { d: "ES", s: raw.es }
+  ];
+  const aiData = [
+    { d: "LS", s: raw.ls }, { d: "VCD", s: raw.vcd }, { d: "DME", s: raw.dme },
+    { d: "ANC", s: raw.anc }, { d: "CIR", s: raw.cir }
+  ];
+
+  // Build CAP line chart data
+  const capData = [];
+  for (let yr = 0; yr <= 25; yr++) {
+    capData.push({
+      year: yr,
+      base: Math.max(0, data.baseCap - yr * 0.4),
+      adj: Math.max(0, data.adjCap - yr * 0.35)
+    });
+  }
+
+  return html`
+    <div class="sector-detail">
+      <button class="back-btn" onClick=${onBack}>
+        ← Sectors
+      </button>
+
+      <div class="detail-header" style="border-left: 4px solid ${tc}">
+        <div class="detail-title-row">
+          <h2 class="detail-title">${sector}</h2>
+          <span class="tier-badge-lg" style="background: ${tc}20; color: ${tc}">
+            ${data.tier}
+          </span>
+        </div>
+        <div class="detail-net" style="color: ${nc}">
+          Net: ${data.netScore > 0 ? "+" : ""}${data.netScore.toFixed(2)}
+        </div>
+      </div>
+
+      <!-- Score Pills -->
+      <div class="score-pills">
+        <div class="pill">
+          <span class="pill-label">Moat</span>
+          <span class="pill-value" style="color: ${C.ww1}">${data.moatScore.toFixed(2)}</span>
+        </div>
+        <div class="pill">
+          <span class="pill-label">AI Risk</span>
+          <span class="pill-value" style="color: ${C.orange}">${data.aiScore.toFixed(2)}</span>
+        </div>
+        <div class="pill">
+          <span class="pill-label">Base CAP</span>
+          <span class="pill-value">${data.baseCap}y</span>
+        </div>
+        <div class="pill">
+          <span class="pill-label">Adj CAP</span>
+          <span class="pill-value">${data.adjCap}y</span>
+        </div>
+        <div class="pill">
+          <span class="pill-label">AI Prem</span>
+          <span class="pill-value" style="color: ${C.red}">+${data.aiPremBps}bp</span>
+        </div>
+      </div>
+
+      <!-- Radar Charts -->
+      <div class="radar-pair">
+        <div class="radar-col">
+          <div class="radar-label">Moat Sources</div>
+          <${RadarChart} data=${moatData} size=${200} color=${C.ww1} />
+        </div>
+        <div class="radar-col">
+          <div class="radar-label">AI Risk Dimensions</div>
+          <${RadarChart} data=${aiData} size=${200} color=${C.orange} />
+        </div>
+      </div>
+
+      <!-- Factor Breakdown -->
+      <div class="detail-section">
+        <h3 class="section-title">Moat Factor Scores</h3>
+        <div class="factor-grid">
+          ${moatData.map(f => html`
+            <div class="factor-item">
+              <span class="factor-abbr">${f.d}</span>
+              <span class="factor-name">${MOAT_LABELS[f.d.toLowerCase()] || f.d}</span>
+              <span class="factor-score" style="color: ${f.s >= 4 ? C.green : f.s >= 3 ? C.ww1 : C.dim}">${f.s}/5</span>
+            </div>
+          `)}
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <h3 class="section-title" style="color: ${C.orange}">AI Disruption Scores</h3>
+        <${HBarChart} data=${aiData.map(f => ({
+          d: AI_LABELS[f.d.toLowerCase()] || f.d, s: f.s
+        }))} color=${v => v >= 4 ? C.red : v >= 3 ? C.orange : C.green} />
+      </div>
+
+      <!-- CAP Impact Chart -->
+      <div class="detail-section">
+        <h3 class="section-title">Competitive Advantage Period</h3>
+        <p class="section-sub">Base ${data.baseCap}yr → AI-adjusted ${data.adjCap}yr (${Math.round((1 - data.adjCap / data.baseCap) * 100)}% haircut)</p>
+        <${LineChart} data=${capData} />
+      </div>
+    </div>
+  `;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// ADDITIONAL CSS FOR CHUNK 2 (append to <style>)
+// ═══════════════════════════════════════════════════════════
+/*
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.radar-chart {
+  max-width: 200px;
+  margin: 0 auto;
+}
+
+/* ─── Sector Detail ─── */
+.sector-detail {
+  padding-bottom: 24px;
+}
+
+.back-btn {
+  background: none;
+  border: none;
+  color: #4a9eff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 8px 0 16px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.detail-header {
+  background: #0f1929;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.detail-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.detail-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.tier-badge-lg {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 8px;
+  letter-spacing: 0.05em;
+}
+
+.detail-net {
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-family: "SF Mono", ui-monospace, monospace;
+  margin-top: 4px;
+}
+
+.score-pills {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.pill {
+  background: #0f1929;
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: center;
+}
+
+.pill-label {
+  display: block;
+  font-size: 0.65rem;
+  color: #8899aa;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+.pill-value {
+  display: block;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-family: "SF Mono", ui-monospace, monospace;
+  color: #e2e8f0;
+}
+
+.radar-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.radar-col {
+  text-align: center;
+}
+
+.radar-label {
+  font-size: 0.65rem;
+  color: #8899aa;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.detail-section {
+  background: #0f1929;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.section-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #4a9eff;
+  margin-bottom: 8px;
+}
+
+.section-sub {
+  font-size: 0.75rem;
+  color: #8899aa;
+  margin-bottom: 10px;
+}
+
+.factor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.factor-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: #0a0f1a;
+  border-radius: 8px;
+}
+
+.factor-abbr {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #8899aa;
+  width: 28px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.factor-name {
+  font-size: 0.75rem;
+  color: #c8d6e5;
+  flex: 1;
+}
+
+.factor-score {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-family: "SF Mono", ui-monospace, monospace;
+  flex-shrink: 0;
+}
+
+*/
+
+</script>
