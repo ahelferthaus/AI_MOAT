@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0f1a">
+  <title>MOAT Analyzer</title>
+
+  <!-- Preact + htm (no build step, CDN-loaded) -->
+  <script type="module">
+    import { h, render } from 'https://esm.sh/preact@10.19.3';
+    import { useState, useEffect, useMemo, useCallback, useRef } from 'https://esm.sh/preact@10.19.3/hooks';
+    import htm from 'https://esm.sh/htm@3.1.1';
+
+    const html = htm.bind(h);
+
+    // ═══════════════════════════════════════════════════════════
+    // CONSTANTS
+    // ═══════════════════════════════════════════════════════════
+
+    const C = {
+      bg: "#0a0f1a", bgCard: "#111827", bgAlt: "#1a2332",
+      text: "#e2e8f0", dim: "#8899aa", border: "#1e2d3d",
+      accent: "#4da3ff", primary: "#326295",
+      green: "#43b02a", greenLt: "#b3d57d",
+      yellow: "#ede04b", orange: "#f39c12", red: "#e74c3c",
+      grayMid: "#97999b", purple: "#a855f7", cyan: "#06b6d4",
+    };
+
+    const TIER_COLORS = {
+      CRITICAL: C.red, HIGH: C.orange, MEDIUM: C.yellow,
+      "LOW-MEDIUM": C.greenLt, LOW: C.green,
+    };
+
+    const MOAT_LABELS = {
+      sc: "Switching Costs", ne: "Network Effects",
+      ia: "Intangible Assets", ca: "Cost Advantage",
+      es: "Efficient Scale",
+    };
+
+    const AI_LABELS = {
+      ls: "Labor Substitution", vcd: "Value Chain Disruption",
+      dme: "Data/Model Edge", anc: "Autonomous New Competition",
+      cir: "Customer Interaction Risk",
+    };
+
+    const SECTOR_DB = {
+      "Information Technology":  { sc:4, ne:4, ia:4, ca:3, es:2, ls:3, vcd:2, dme:3, anc:4, cir:3 },
+      "Communication Services":  { sc:3, ne:5, ia:4, ca:2, es:3, ls:3, vcd:3, dme:4, anc:3, cir:4 },
+      "Health Care":             { sc:3, ne:1, ia:5, ca:2, es:3, ls:2, vcd:2, dme:2, anc:3, cir:2 },
+      "Financials":              { sc:3, ne:2, ia:3, ca:3, es:3, ls:5, vcd:4, dme:3, anc:4, cir:4 },
+      "Consumer Staples":        { sc:2, ne:1, ia:4, ca:4, es:2, ls:2, vcd:2, dme:1, anc:2, cir:1 },
+      "Industrials":             { sc:3, ne:1, ia:3, ca:4, es:3, ls:3, vcd:2, dme:2, anc:2, cir:2 },
+      "Consumer Discretionary":  { sc:2, ne:2, ia:3, ca:2, es:1, ls:3, vcd:4, dme:3, anc:3, cir:3 },
+      "Energy":                  { sc:1, ne:1, ia:2, ca:4, es:4, ls:1, vcd:1, dme:1, anc:1, cir:1 },
+      "Utilities":               { sc:2, ne:1, ia:3, ca:3, es:5, ls:1, vcd:1, dme:1, anc:1, cir:1 },
+      "Real Estate":             { sc:2, ne:1, ia:2, ca:2, es:3, ls:3, vcd:4, dme:2, anc:3, cir:3 },
+      "Materials":               { sc:1, ne:1, ia:2, ca:4, es:3, ls:2, vcd:1, dme:1, anc:1, cir:1 },
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // COMPUTATION FUNCTIONS (Chunk 2 will expand these)
+    // ═══════════════════════════════════════════════════════════
+
+    function calcMoat(d) {
+      return d.sc * 0.25 + d.ne * 0.20 + d.ia * 0.25 + d.ca * 0.15 + d.es * 0.15;
+    }
+
+    function calcAI(d) {
+      return d.ls * 0.25 + d.vcd * 0.25 + d.dme * 0.15 + d.anc * 0.20 + d.cir * 0.15;
+    }
+
+    function CAP(m) {
+      return m >= 4 ? 22 : m >= 3.5 ? 18 : m >= 3 ? 14 : m >= 2.5 ? 10 : m >= 2 ? 7 : 4;
+    }
+
+    function adjCAP(c, ai, bm = 0) {
+      return Math.max(2, Math.round(c * (1 - Math.max(0, (ai - 1.5) * 0.15) - bm * 0.05)));
+    }
+
+    function aiPrem(ai, bm = 0) {
+      return Math.min(400, (ai >= 4 ? 300 : ai >= 3.5 ? 225 : ai >= 3 ? 150 : ai >= 2.5 ? 100 : ai >= 2 ? 50 : 0) + bm * 15);
+    }
+
+    function justPE(r, g, c) {
+      if (r <= g) return 30;
+      return Math.max(5, Math.min(50,
+        (1 / (r - g)) * (1 - Math.pow((1 + g) / (1 + r), c)) +
+        Math.pow((1 + g) / (1 + r), c) * (1 / (r - 0.02))
+      ));
+    }
+
+    function tier(n) {
+      return n <= -2 ? "CRITICAL" : n <= -0.5 ? "HIGH" : n <= 0.5 ? "MEDIUM" : n <= 1.5 ? "LOW-MEDIUM" : "LOW";
+    }
+
+    function computeSComp(overrides = { sectors: {}, tickers: {} }) {
+      const results = {};
+      for (const [sector, base] of Object.entries(SECTOR_DB)) {
+        const ov = overrides.sectors?.[sector] || {};
+        const merged = { ...base, ...ov };
+        const ms = calcMoat(merged);
+        const ai = calcAI(merged);
+        const net = ms - ai;
+        results[sector] = {
+          moatScore: ms, aiScore: ai, netScore: net,
+          tier: tier(net), baseCap: CAP(ms),
+          adjCap: adjCAP(CAP(ms), ai),
+          aiPremBps: aiPrem(ai),
+          ...merged,
+        };
+      }
+      return results;
+    }
+
+    function loadOverrides() {
+      try {
+        return JSON.parse(localStorage.getItem("pm_overrides") || '{"sectors":{},"tickers":{}}');
+      } catch (e) { return { sectors: {}, tickers: {} }; }
+    }
+
+    function saveOverrides(o) {
+      localStorage.setItem("pm_overrides", JSON.stringify(o));
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // PLACEHOLDER COMPONENTS (Chunks 3-4 will replace these)
+    // ═══════════════════════════════════════════════════════════
+
+    function SectorCard({ sector, data }) {
+      const tc = TIER_COLORS[data.tier] || C.dim;
+      return html`
+        <div class="sector-card" style="border-left: 3px solid ${tc}">
+          <div class="sector-header">
+            <span class="sector-name">${sector}</span>
+            <span class="tier-badge" style="background: ${tc}20; color: ${tc}">${data.tier}</span>
+          </div>
+          <div class="sector-scores">
+            <div class="score-item">
+              <span class="score-label">Moat</span>
+              <span class="score-value">${data.moatScore.toFixed(1)}</span>
+            </div>
+            <div class="score-item">
+              <span class="score-label">AI Risk</span>
+              <span class="score-value">${data.aiScore.toFixed(1)}</span>
+            </div>
+            <div class="score-item">
+              <span class="score-label">Net</span>
+              <span class="score-value" style="color: ${tc}">${data.netScore > 0 ? "+" : ""}${data.netScore.toFixed(1)}</span>
+            </div>
+            <div class="score-item">
+              <span class="score-label">Adj CAP</span>
+              <span class="score-value">${data.adjCap}y</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // APP COMPONENT (Chunk 5 will build the full version)
+    // ═══════════════════════════════════════════════════════════
+
+    function App() {
+      const [overrides, setOverrides] = useState(() => loadOverrides());
+      const [activeTab, setActiveTab] = useState("sectors");
+      const [selectedSector, setSelectedSector] = useState(null);
+
+      const sComp = useMemo(() => computeSComp(overrides), [overrides]);
+
+      const sorted = useMemo(() => {
+        return Object.entries(sComp)
+          .sort((a, b) => a[1].netScore - b[1].netScore);
+      }, [sComp]);
+
+      return html`
+        <div class="app">
+          <header class="app-header">
+            <h1>🏰 MOAT Analyzer</h1>
+            <p class="subtitle">Competitive Moat & AI Disruption Risk</p>
+          </header>
+
+          <nav class="tab-bar">
+            <button class="tab ${activeTab === 'sectors' ? 'active' : ''}"
+              onClick=${() => setActiveTab('sectors')}>Sectors</button>
+            <button class="tab ${activeTab === 'portfolio' ? 'active' : ''}"
+              onClick=${() => setActiveTab('portfolio')}>Portfolio</button>
+            <button class="tab ${activeTab === 'settings' ? 'active' : ''}"
+              onClick=${() => setActiveTab('settings')}>Settings</button>
+          </nav>
+
+          <main class="content">
+            ${activeTab === 'sectors' && html`
+              <div class="sector-list">
+                ${sorted.map(([sector, data]) => html`
+                  <${SectorCard}
+                    key=${sector}
+                    sector=${sector}
+                    data=${data}
+                    onClick=${() => setSelectedSector(sector)}
+                  />
+                `)}
+              </div>
+            `}
+
+            ${activeTab === 'portfolio' && html`
+              <div class="placeholder">
+                <p>📊 Portfolio view coming in Chunk 4</p>
+                <p class="dim">Ticker-level analysis with FMP data</p>
+              </div>
+            `}
+
+            ${activeTab === 'settings' && html`
+              <div class="placeholder">
+                <p>⚙️ Settings coming in Chunk 5</p>
+                <p class="dim">PM overrides, API keys, export</p>
+              </div>
+            `}
+          </main>
+
+          <footer class="app-footer">
+            <span class="dim">MOAT Analyzer v1.0 — iOS PWA</span>
+          </footer>
+        </div>
+      `;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // MOUNT
+    // ═══════════════════════════════════════════════════════════
+
+    render(html`<${App} />`, document.getElementById('app'));
+  </script>
+
+  <style>
+    /* ═══ RESET & BASE ═══ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html {
+      font-size: 15px;
+      -webkit-text-size-adjust: 100%;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: #0a0f1a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
+      overflow-x: hidden;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right)
+               env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+
+    /* ═══ APP LAYOUT ═══ */
+    .app {
+      max-width: 100%;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .app-header {
+      padding: 20px 16px 12px;
+      text-align: center;
+      border-bottom: 1px solid #1e2d3d;
+    }
+
+    .app-header h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      font-size: 0.8rem;
+      color: #8899aa;
+      margin-top: 2px;
+    }
+
+    /* ═══ TAB BAR ═══ */
+    .tab-bar {
+      display: flex;
+      gap: 0;
+      padding: 8px 16px;
+      border-bottom: 1px solid #1e2d3d;
+      background: #111827;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 10px 0;
+      background: transparent;
+      border: none;
+      color: #8899aa;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border-radius: 8px;
+      transition: all 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .tab.active {
+      background: #1a2332;
+      color: #4da3ff;
+    }
+
+    /* ═══ CONTENT ═══ */
+    .content {
+      flex: 1;
+      padding: 12px 12px 80px;
+    }
+
+    /* ═══ SECTOR CARDS ═══ */
+    .sector-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .sector-card {
+      background: #111827;
+      border-radius: 10px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .sector-card:active {
+      transform: scale(0.98);
+      background: #1a2332;
+    }
+
+    .sector-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .sector-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .tier-badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+    }
+
+    .sector-scores {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+    }
+
+    .score-item {
+      text-align: center;
+    }
+
+    .score-label {
+      display: block;
+      font-size: 0.65rem;
+      color: #8899aa;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .score-value {
+      display: block;
+      font-size: 1rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ═══ PLACEHOLDER ═══ */
+    .placeholder {
+      text-align: center;
+      padding: 60px 20px;
+      color: #8899aa;
+    }
+
+    .placeholder p:first-child {
+      font-size: 1.2rem;
+      margin-bottom: 8px;
+    }
+
+    .dim { color: #8899aa; }
+
+    /* ═══ FOOTER ═══ */
+    .app-footer {
+      padding: 12px;
+      text-align: center;
+      font-size: 0.7rem;
+      border-top: 1px solid #1e2d3d;
+    }
+
+    /* ═══ CHART CONTAINERS (for Chunk 3) ═══ */
+    .chart-container {
+      width: 100%;
+      overflow: hidden;
+    }
+
+    .chart-container svg {
+      width: 100%;
+      height: auto;
+    }
+
+    /* ═══ TABLE STYLES (for Chunk 4) ═══ */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    .data-table th {
+      text-align: left;
+      padding: 8px 6px;
+      color: #8899aa;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid #1e2d3d;
+    }
+
+    .data-table td {
+      padding: 8px 6px;
+      border-bottom: 1px solid #1e2d3d10;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ═══ FORM ELEMENTS (for Chunk 5) ═══ */
+    .input-field {
+      background: #1a2332;
+      border: 1px solid #1e2d3d;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      width: 100%;
+      outline: none;
+      -webkit-appearance: none;
+    }
+
+    .input-field:focus {
+      border-color: #4da3ff;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: opacity 0.15s;
+    }
+
+    .btn:active { opacity: 0.8; }
+
+    .btn-primary {
+      background: #4da3ff;
+      color: #0a0f1a;
+    }
+
+    .btn-secondary {
+      background: #1a2332;
+      color: #e2e8f0;
+      border: 1px solid #1e2d3d;
+    }
+
+    /* ═══ UTILITY ═══ */
+    .flex { display: flex; }
+    .flex-col { flex-direction: column; }
+    .items-center { align-items: center; }
+    .justify-between { justify-content: space-between; }
+    .gap-2 { gap: 8px; }
+    .gap-4 { gap: 16px; }
+    .p-3 { padding: 12px; }
+    .p-4 { padding: 16px; }
+    .mt-2 { margin-top: 8px; }
+    .mt-4 { margin-top: 16px; }
+    .text-sm { font-size: 0.8rem; }
+    .text-xs { font-size: 0.7rem; }
+    .font-bold { font-weight: 700; }
+    .rounded { border-radius: 8px; }
+    .bg-card { background: #111827; }
+
+    /* ═══ iOS-SPECIFIC ═══ */
+    @supports (-webkit-touch-callout: none) {
+      /* iOS safe area padding already handled by env() above */
+      .tab-bar {
+        padding-top: max(8px, env(safe-area-inset-top));
+      }
+    }
+
+    /* Prevent rubber-banding on scroll */
+    html { overflow: hidden; height: 100%; }
+    body { overflow-y: auto; height: 100%; -webkit-overflow-scrolling: touch; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8899aa">
+      Loading MOAT Analyzer...
+    </div>
+  </div>
+</body>
+</html>
